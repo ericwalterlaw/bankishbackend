@@ -14,6 +14,7 @@ const PORT = process.env.PORT || 3001;
 
 const allowedOrigins = [
   "http://localhost:5173",
+  "http://localhost:5174",
 "https://prismatic-narwhal-780e93.netlify.app"
 ];
 
