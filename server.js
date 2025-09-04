@@ -12,11 +12,23 @@ const PORT = process.env.PORT || 3001;
 
 // Middleware
 
+const allowedOrigins = [
+  "http://localhost:5173",
+"https://prismatic-narwhal-780e93.netlify.app"
+];
+
 app.use(cors({
-  origin: "https://prismatic-narwhal-780e93.netlify.app", // your Netlify URL
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
+
 
 app.use(express.json());
 
