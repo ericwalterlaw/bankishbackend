@@ -67,16 +67,61 @@ const accountSchema = new mongoose.Schema({
 
 // Transaction Schema
 const transactionSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  accountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account', required: true },
-  type: { type: String, enum: ['deposit', 'withdrawal', 'transfer', 'payment'], required: true },
-  amount: { type: Number, required: true },
+  userId: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'User', 
+    required: true 
+  },
+  accountId: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'Account', 
+    required: true 
+  },
+  type: { 
+    type: String, 
+    enum: ['deposit', 'withdrawal', 'transfer', 'payment', 'crypto'], 
+    required: true 
+  },
+  amount: { 
+    type: Number, 
+    required: true 
+  },
   description: String,
+
+  // Fiat payments
   recipientAccount: String,
   recipientName: String,
-  status: { type: String, enum: ['pending', 'completed', 'failed'], default: 'completed' },
-  createdAt: { type: Date, default: Date.now }
+
+  // Crypto-specific fields
+  cryptoType: { 
+    type: String, 
+    enum: ['BTC', 'ETH', 'USDT'], 
+    required: function () { return this.type === 'crypto'; } 
+  },
+  recipientAddress: { 
+    type: String, 
+    required: function () { return this.type === 'crypto'; } 
+  },
+  networkFee: { 
+    type: Number, // store numeric fee in same currency as amount
+    required: false 
+  },
+  network: { 
+    type: String, // e.g. "Ethereum", "Tron", "Bitcoin mainnet"
+    required: false 
+  },
+
+  status: { 
+    type: String, 
+    enum: ['pending', 'completed', 'failed'], 
+    default: 'completed' 
+  },
+  createdAt: { 
+    type: Date, 
+    default: Date.now 
+  }
 });
+
 
 // Card Schema
 const cardSchema = new mongoose.Schema({
@@ -252,8 +297,19 @@ app.get('/api/transactions', authenticateToken, async (req, res) => {
 
 app.post('/api/transactions/transfer', authenticateToken, async (req, res) => {
   try {
-    const { fromAccountId, toAccount, amount, description, transferType } = req.body;
+    const { 
+      fromAccountId, 
+      toAccount,          // for fiat transfers (account number / IBAN)
+      amount, 
+      description, 
+      transferType,       // "internal" | "swift" | "sepa" | "crypto"
+      cryptoType,         // required if crypto
+      recipientAddress,   // required if crypto
+      networkFee,         // optional for crypto
+      network             // optional for crypto (Ethereum, Bitcoin, Tron, etc.)
+    } = req.body;
 
+    // Validate sender account
     const fromAccount = await Account.findOne({
       _id: fromAccountId,
       userId: req.user.userId
@@ -269,6 +325,13 @@ app.post('/api/transactions/transfer', authenticateToken, async (req, res) => {
     });
 
     let toAccountDoc = null;
+    let transactionPayload = {
+      userId: req.user.userId,
+      accountId: fromAccountId,
+      amount,
+      description: description || 'Money Transfer',
+      status: 'completed'
+    };
 
     if (transferType === 'internal') {
       // Find recipient account inside same user
@@ -285,23 +348,41 @@ app.post('/api/transactions/transfer', authenticateToken, async (req, res) => {
       await Account.findByIdAndUpdate(toAccountDoc._id, {
         $inc: { balance: amount }
       });
-    } else {
-      // External transfer – you wouldn’t update an internal account here,
-      // just log the recipient account number
-      toAccountDoc = { accountNumber: toAccount };
+
+      transactionPayload = {
+        ...transactionPayload,
+        type: 'transfer',
+        recipientAccount: toAccount
+      };
+    } 
+    
+    else if (transferType === 'crypto') {
+      // Crypto transfer – don’t look for internal account
+      if (!cryptoType || !recipientAddress) {
+        return res.status(400).json({ message: 'Crypto type and recipient address are required' });
+      }
+
+      transactionPayload = {
+        ...transactionPayload,
+        type: 'crypto',
+        cryptoType,
+        recipientAddress,
+        networkFee: networkFee || 0,
+        network: network || null
+      };
+    } 
+    
+    else {
+      // External fiat transfer (SWIFT / SEPA)
+      transactionPayload = {
+        ...transactionPayload,
+        type: 'transfer',
+        recipientAccount: toAccount
+      };
     }
 
-    // Record transaction
-    const transaction = new Transaction({
-      userId: req.user.userId,
-      accountId: fromAccountId,
-      type: 'transfer',
-      amount: -amount,
-      description: description || 'Money Transfer',
-      recipientAccount: toAccount,
-      status: 'completed'
-    });
-
+    // Save transaction
+    const transaction = new Transaction(transactionPayload);
     await transaction.save();
 
     res.json({
@@ -310,6 +391,7 @@ app.post('/api/transactions/transfer', authenticateToken, async (req, res) => {
       updatedFrom: fromAccountId,
       updatedTo: toAccountDoc?._id || null
     });
+
   } catch (error) {
     console.error('Transfer error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
