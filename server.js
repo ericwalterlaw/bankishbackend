@@ -4,11 +4,15 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import ImageKit from "imagekit";
+import multer from "multer";
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+
 
 // Middleware
 
@@ -33,6 +37,12 @@ app.use(cors({
 
 app.use(express.json());
 
+const imagekit = new ImageKit({
+  publicKey: process.env.IMAGEKIT_PUBLIC,
+  privateKey: process.env.IMAGEKIT_PRIVATE,
+  urlEndpoint: process.env.IMAGEKIT_URL_ENDPOINT
+});
+
 // MongoDB connection
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('Connected to MongoDB'))
@@ -52,6 +62,9 @@ const userSchema = new mongoose.Schema({
     state: String,
     zipCode: String
   },
+  awcCode: { type: String, unique: true }, // <-- NEW
+  avatar: { type: String }, // 🔹 Store ImageKit URL
+
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -167,6 +180,12 @@ const generateCardNumber = () => {
   return '4532' + Math.floor(Math.random() * 1000000000000).toString().padStart(12, '0');
 };
 
+function generateAWCCode() {
+  const randomPart = Math.random().toString(36).substring(2, 8).toUpperCase();
+  return `AWC-${randomPart}`;
+}
+
+
 // Auth routes
 app.post('/api/auth/register', async (req, res) => {
   try {
@@ -178,13 +197,16 @@ app.post('/api/auth/register', async (req, res) => {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    
+
+    const awcCode = generateAWCCode();
+
     const user = new User({
       email,
       password: hashedPassword,
       firstName,
       lastName,
-      phone
+      phone,
+      awcCode // assign here
     });
 
     await user.save();
@@ -219,20 +241,22 @@ app.post('/api/auth/register', async (req, res) => {
     await debitCard.save();
 
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'banking_secret_key');
-    
+
     res.status(201).json({
       token,
       user: {
         id: user._id,
         email: user.email,
         firstName: user.firstName,
-        lastName: user.lastName
+        lastName: user.lastName,
+        awcCode: user.awcCode // return it in response
       }
     });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
+
 
 app.post('/api/auth/login', async (req, res) => {
   try {
@@ -513,6 +537,30 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
     res.json(user);
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch profile', error: error.message });
+  }
+});
+
+app.post("/upload-avatar", authenticateToken, upload.single("avatar"), async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const uploadedImage = await imagekit.upload({
+      file: req.file.buffer, // file buffer
+      fileName: `${userId}-avatar.jpg`,
+      folder: "/avatars"
+    });
+
+    // Save URL to user profile
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      { avatar: uploadedImage.url },
+      { new: true }
+    );
+
+    res.json({ success: true, avatar: updatedUser.avatar });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: "Avatar upload failed" });
   }
 });
 
