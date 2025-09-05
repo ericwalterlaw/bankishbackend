@@ -541,7 +541,7 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
-app.post("/upload-avatar", authenticateToken, upload.single("avatar"), async (req, res) => {
+app.post("/api/upload-avatar", authenticateToken, upload.single("avatar"), async (req, res) => {
   try {
     const userId = req.user.id;
 
