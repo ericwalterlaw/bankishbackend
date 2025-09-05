@@ -12,8 +12,8 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-const upload = multer();
-
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
 
 // Middleware
 
@@ -541,29 +541,36 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
-app.post("/api/upload-avatar", authenticateToken, upload.single("avatar"), async (req, res) => {
-  try {
-    const userId = req.user.id;
+app.post(
+  "/api/upload-avatar",
+  authenticateToken,
+  upload.single("avatar"), // must match FormData key
+  async (req, res) => {
+    try {
+      const userId = req.user.userId;
 
-    const uploadedImage = await imagekit.upload({
-      file: req.file.buffer, // file buffer
-      fileName: `${userId}-avatar.jpg`,
-      folder: "/avatars"
-    });
+      if (!req.file) {
+        return res.status(400).json({ success: false, message: "No file uploaded" });
+      }
+      const uploadedImage = await imagekit.upload({
+        file: req.file.buffer, // buffer works because memoryStorage
+        fileName: `${userId}-avatar.jpg`,
+        folder: "/avatars"
+      });
 
-    // Save URL to user profile
-    const updatedUser = await User.findByIdAndUpdate(
-      userId,
-      { avatar: uploadedImage.url },
-      { new: true }
-    );
+      const updatedUser = await User.findByIdAndUpdate(
+        userId,
+        { avatar: uploadedImage.url },
+        { new: true }
+      );
 
-    res.json({ success: true, avatar: updatedUser.avatar });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ success: false, message: "Avatar upload failed" });
+      res.json({ success: true, avatar: updatedUser.avatar });
+    } catch (error) {
+      console.error("Upload error:", error);
+      res.status(500).json({ success: false, message: "Avatar upload failed" });
+    }
   }
-});
+);
 
 
 app.listen(PORT, () => {
