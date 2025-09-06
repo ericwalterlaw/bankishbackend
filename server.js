@@ -31,7 +31,7 @@ app.use(cors({
       callback(new Error("Not allowed by CORS"));
     }
   },
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
@@ -65,6 +65,8 @@ const userSchema = new mongoose.Schema({
   },
   awcCode: { type: String, unique: true }, // <-- NEW
   avatar: { type: String }, // 🔹 Store ImageKit URL
+  role: { type: String, enum: ["user", "admin"], default: "user" }, // ✅ added role
+
 
   createdAt: { type: Date, default: Date.now }
 });
@@ -155,6 +157,17 @@ const Account = mongoose.model('Account', accountSchema);
 const Transaction = mongoose.model('Transaction', transactionSchema);
 const Card = mongoose.model('Card', cardSchema);
 
+
+// Virtual populate for accounts
+userSchema.virtual("accounts", {
+  ref: "Account",
+  localField: "_id",
+  foreignField: "userId",
+});
+
+userSchema.set("toJSON", { virtuals: true });
+userSchema.set("toObject", { virtuals: true });
+
 // Auth middleware
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
@@ -170,6 +183,14 @@ const authenticateToken = (req, res, next) => {
     next();
   });
 };
+
+function adminMiddleware(req, res, next) {
+  if (req.user?.role !== "admin") {
+    return res.status(403).json({ message: "Access denied" });
+  }
+  next();
+}
+
 
 // Generate account number
 const generateAccountNumber = () => {
@@ -207,6 +228,7 @@ app.post('/api/auth/register', async (req, res) => {
       firstName,
       lastName,
       phone,
+      role: "user",
       awcCode // assign here
     });
 
@@ -241,7 +263,7 @@ app.post('/api/auth/register', async (req, res) => {
     });
     await debitCard.save();
 
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'banking_secret_key');
+    const token = jwt.sign({ userId: user._id, role: user.role}, process.env.JWT_SECRET || 'banking_secret_key');
 
     res.status(201).json({
       token,
@@ -250,7 +272,8 @@ app.post('/api/auth/register', async (req, res) => {
         email: user.email,
         firstName: user.firstName,
         lastName: user.lastName,
-        awcCode: user.awcCode // return it in response
+        role: user.role,
+        awcCode: user.awcCode, // return it in response
       }
     });
   } catch (error) {
@@ -273,7 +296,7 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ message: 'Invalid credentials' });
     }
 
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'banking_secret_key');
+    const token = jwt.sign({ userId: user._id, role: user.role}, process.env.JWT_SECRET || 'banking_secret_key');
     
     res.json({
       token,
@@ -281,7 +304,8 @@ app.post('/api/auth/login', async (req, res) => {
         id: user._id,
         email: user.email,
         firstName: user.firstName,
-        lastName: user.lastName
+        lastName: user.lastName,
+        role: user.role
       }
     });
   } catch (error) {
@@ -572,6 +596,89 @@ app.post(
   }
 );
 
+
+
+app.patch("/api/admin/accounts/:id", authenticateToken, adminMiddleware, async (req, res) => {
+  try {
+    const { balance } = req.body;
+    const account = await Account.findByIdAndUpdate(
+      req.params.id,
+      { balance },
+      { new: true }
+    );
+    if (!account) return res.status(404).json({ message: "Account not found" });
+    res.json(account);
+  } catch (err) {
+    res.status(500).json({ message: "Error updating account", error: err.message });
+  }
+});
+
+app.post("/api/admin/transactions", authenticateToken, adminMiddleware, async (req, res) => {
+  try {
+    const { userId, accountId, type, amount, description } = req.body;
+
+    const account = await Account.findById(accountId);
+    if (!account) {
+      return res.status(404).json({ message: "Account not found" });
+    }
+
+    // Adjust balance based on transaction type
+    if (type === "deposit") {
+      account.balance += Number(amount);
+    } else if (type === "withdrawal" || type === "payment") {
+      if (account.balance < amount) {
+        return res.status(400).json({ message: "Insufficient funds" });
+      }
+      account.balance -= Number(amount);
+    } else if (type === "transfer") {
+      // for admin manual transfers, just deduct here
+      if (account.balance < amount) {
+        return res.status(400).json({ message: "Insufficient funds" });
+      }
+      account.balance -= Number(amount);
+    }
+
+    await account.save();
+
+    // Save transaction
+    const transaction = new Transaction({
+      userId,
+      accountId,
+      type,
+      amount,
+      description,
+      status: "completed",
+    });
+    await transaction.save();
+
+    res.status(201).json({ message: "Transaction added", transaction, updatedBalance: account.balance });
+  } catch (err) {
+    res.status(500).json({ message: "Error creating transaction", error: err.message });
+  }
+});
+
+// backend: get all users + their accounts
+
+app.get("/api/admin/users", authenticateToken, adminMiddleware, async (req, res) => {
+  try {
+    // Get all users (lean makes it plain JS objects so we can merge easily)
+    const users = await User.find().lean();
+
+    // Get all accounts
+    const accounts = await Account.find().lean();
+
+    // Merge accounts into each user
+    const usersWithAccounts = users.map(user => ({
+      ...user,
+      accounts: accounts.filter(acc => acc.userId.toString() === user._id.toString())
+    }));
+
+    res.json(usersWithAccounts);
+  } catch (err) {
+    console.error("Error fetching users:", err);
+    res.status(500).json({ message: "Error fetching users", error: err.message });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
