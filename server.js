@@ -658,28 +658,105 @@ app.post("/api/admin/transactions", authenticateToken, adminMiddleware, async (r
   }
 });
 
-// backend: get all users + their accounts
+// =================== GET USERS WITH ACCOUNTS + TRANSACTIONS ===================
+app.get(
+  "/api/admin/users",
+  authenticateToken,
+  adminMiddleware,
+  async (req, res) => {
+    try {
+      // Get all users
+      const users = await User.find().lean();
 
-app.get("/api/admin/users", authenticateToken, adminMiddleware, async (req, res) => {
-  try {
-    // Get all users (lean makes it plain JS objects so we can merge easily)
-    const users = await User.find().lean();
+      // Get all accounts
+      const accounts = await Account.find().lean();
 
-    // Get all accounts
-    const accounts = await Account.find().lean();
+      // Get all transactions
+      const transactions = await Transaction.find().lean();
 
-    // Merge accounts into each user
-    const usersWithAccounts = users.map(user => ({
-      ...user,
-      accounts: accounts.filter(acc => acc.userId.toString() === user._id.toString())
-    }));
+      // Merge accounts + transactions into each user
+      const usersWithAccounts = users.map((user) => {
+        const userAccounts = accounts.filter(
+          (acc) => acc.userId.toString() === user._id.toString()
+        );
 
-    res.json(usersWithAccounts);
-  } catch (err) {
-    console.error("Error fetching users:", err);
-    res.status(500).json({ message: "Error fetching users", error: err.message });
+        // Attach transactions for each account
+        const accountsWithTx = userAccounts.map((acc) => ({
+          ...acc,
+          transactions: transactions.filter(
+            (tx) => tx.accountId.toString() === acc._id.toString()
+          ),
+        }));
+
+        return {
+          ...user,
+          accounts: accountsWithTx,
+        };
+      });
+
+      res.json(usersWithAccounts);
+    } catch (err) {
+      console.error("Error fetching users:", err);
+      res
+        .status(500)
+        .json({ message: "Error fetching users", error: err.message });
+    }
   }
-});
+);
+
+// =================== DELETE TRANSACTION ===================
+app.delete(
+  "/api/admin/transactions/:id",
+  authenticateToken,
+  adminMiddleware,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      // Find the transaction
+      const transaction = await Transaction.findById(id);
+      if (!transaction) {
+        return res.status(404).json({ message: "Transaction not found" });
+      }
+
+      // Find related account
+      const account = await Account.findById(transaction.accountId);
+      if (!account) {
+        return res.status(404).json({ message: "Account not found" });
+      }
+
+      const amount = Number(transaction.amount);
+
+      // Reverse balance effect
+      if (transaction.type === "deposit") {
+        account.balance -= amount;
+      } else if (
+        transaction.type === "withdrawal" ||
+        transaction.type === "payment"
+      ) {
+        account.balance += amount;
+      } else if (transaction.type === "transfer") {
+        account.balance += amount;
+      }
+
+      await account.save();
+
+      // Delete the transaction
+      await transaction.deleteOne();
+
+      res.json({
+        message: "Transaction deleted and balance reverted",
+        updatedBalance: account.balance,
+      });
+    } catch (err) {
+      res.status(500).json({
+        message: "Error deleting transaction",
+        error: err.message,
+      });
+    }
+  }
+);
+
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
